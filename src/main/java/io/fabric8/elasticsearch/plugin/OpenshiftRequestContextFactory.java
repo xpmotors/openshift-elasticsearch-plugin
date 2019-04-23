@@ -26,8 +26,10 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang.ArrayUtils;
@@ -170,6 +172,36 @@ public class OpenshiftRequestContextFactory {
     public static String getUsernameHash(String username) {
         return DigestUtils.sha1Hex(username);
     }
+
+    public List<OpenshiftRequestContext> getAlluserContext() {
+        Set<String> users = apiService.getUsers();
+        Set<Project> allProjects = apiService.projectNames();
+        Map<String,Set<String>> groupUsers = apiService.getGroupUsers();
+        Set<String> clusterAdmins = apiService.getClusterAdmins(groupUsers);
+        Map<String,Set<Project>> userProjects = apiService.getUserProjects(groupUsers,allProjects);
+        List<OpenshiftRequestContext> ret = new ArrayList<>();
+        for (String user : users){
+            boolean isAdmin = clusterAdmins.contains(user);
+            Set<Project> projects = null;
+
+            if(isAdmin){
+                projects = allProjects;
+            }else{
+                projects = userProjects.getOrDefault(user,null);
+                if(projects ==  null){
+                    continue;
+                }
+            }
+            Set<Project> clearProjects = projects.stream()
+                    .filter(project -> !isBlacklistProject(project.getName()))
+                    .collect(Collectors.toSet());
+            OpenshiftRequestContext item = new OpenshiftRequestContext(user,"",isAdmin,clearProjects,getKibanaIndex(user, isAdmin),this.kibanaIndexMode);
+            ret.add(item);
+        }
+        return ret;
+    }
+
+
 
     public static class OpenshiftRequestContext {
 

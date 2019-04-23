@@ -90,7 +90,7 @@ public class OpenShiftElasticSearchPlugin extends Plugin implements Configuratio
         final PluginSettings pluginSettings = new PluginSettings(settings);
         final IndexMappingLoader indexMappingLoader = new IndexMappingLoader(settings);
         final PluginClient pluginClient = new PluginClient(client, threadPool.getThreadContext());
-        final OpenshiftAPIService apiService = new OpenshiftAPIService();
+        final OpenshiftAPIService apiService = new OpenshiftAPIService(pluginSettings);
         final RequestUtils requestUtils = new RequestUtils(pluginSettings, apiService);
         final OpenshiftRequestContextFactory contextFactory = new OpenshiftRequestContextFactory(settings, requestUtils,
                 apiService);
@@ -225,6 +225,7 @@ public class OpenShiftElasticSearchPlugin extends Plugin implements Configuratio
         settings.add(Setting.listSetting(OPENSHIFT_CONFIG_OPS_PROJECTS, Arrays.asList(DEFAULT_OPENSHIFT_OPS_PROJECTS),
                 Function.identity(), Property.NodeScope, Property.Dynamic));
         settings.add(Setting.boolSetting(OPENSHIFT_KIBANA_DISABLE_PROJECT_UID, false, Property.NodeScope));
+        settings.add(Setting.simpleString(OpenshiftAPIService.SERVICE_ACCOUNT_TOKEN, Property.NodeScope));
         return settings;
     }
 

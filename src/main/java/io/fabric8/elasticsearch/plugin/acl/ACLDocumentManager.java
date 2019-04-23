@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
@@ -53,6 +54,7 @@ import com.floragunn.searchguard.support.ConfigConstants;
 import io.fabric8.elasticsearch.plugin.ConfigurationSettings;
 import io.fabric8.elasticsearch.plugin.OpenshiftRequestContextFactory.OpenshiftRequestContext;
 import io.fabric8.elasticsearch.plugin.PluginClient;
+import io.fabric8.elasticsearch.plugin.PluginServiceFactory;
 import io.fabric8.elasticsearch.plugin.PluginSettings;
 import io.fabric8.elasticsearch.plugin.acl.SearchGuardRoles.Roles;
 import io.fabric8.elasticsearch.plugin.acl.SearchGuardRolesMapping.RolesMapping;
@@ -63,7 +65,7 @@ import io.fabric8.elasticsearch.plugin.acl.SearchGuardRolesMapping.RolesMapping;
  *
  */
 public class ACLDocumentManager implements ConfigurationSettings {
-    
+
     private static final String [] CONFIG_DOCS = {SEARCHGUARD_ROLE_TYPE, SEARCHGUARD_MAPPING_TYPE};
     private static final Logger LOGGER = Loggers.getLogger(ACLDocumentManager.class);
     private final ReentrantLock lock = new ReentrantLock();
@@ -80,21 +82,21 @@ public class ACLDocumentManager implements ConfigurationSettings {
         this.threadContext = threadPool.getThreadContext();
         this.configLoader = new ConfigurationLoader(client.getClient(), threadPool, settings.getSettings());
     }
-    
+
     @SuppressWarnings("rawtypes")
     interface ACLDocumentOperation{
-        
+
         void execute(Collection<SearchGuardACLDocument> docs);
-        
+
         BulkRequest buildRequest(Client client, BulkRequestBuilder builder, Collection<SearchGuardACLDocument> docs) throws IOException;
     }
-    
+
     private void logContent(final String message, final String type, final ToXContent content) throws IOException{
         if(LOGGER.isDebugEnabled()) {
             LOGGER.debug(message, type, XContentHelper.toString(content));
         }
     }
-    
+
     private void logDebug(final String message, final Object obj) {
         if(LOGGER.isDebugEnabled()) {
             LOGGER.debug(message, obj);
@@ -109,7 +111,7 @@ public class ACLDocumentManager implements ConfigurationSettings {
         public SyncFromContextOperation(OpenshiftRequestContext context) {
             this.context = context;
         }
-        
+
         @Override
         public void execute(Collection<SearchGuardACLDocument> docs) {
             LOGGER.debug("Syncing from context to ACL...");
@@ -126,7 +128,7 @@ public class ACLDocumentManager implements ConfigurationSettings {
 
         @Override
         public BulkRequest buildRequest(Client client, BulkRequestBuilder builder, Collection<SearchGuardACLDocument> docs) throws IOException{
-            
+
             for (SearchGuardACLDocument doc : docs) {
                 logContent("Updating {} to: {}", doc.getType(), doc);
                 Map<String, Object> content = new HashMap<>();
@@ -142,7 +144,45 @@ public class ACLDocumentManager implements ConfigurationSettings {
             return builder.request();
         }
     }
-    
+
+    class AclSyncOperation implements ACLDocumentOperation{
+        @Override
+        public void execute(Collection<SearchGuardACLDocument> docs) {
+            List<OpenshiftRequestContext> contexts = PluginServiceFactory.getContextFactory().getAlluserContext();
+            LOGGER.debug("Syncing from context to ACL...");
+            for (SearchGuardACLDocument doc : docs) {
+                if(ConfigurationSettings.SEARCHGUARD_MAPPING_TYPE.equals(doc.getType())){
+                    RolesMappingSyncStrategy rolesMappingSync = documentFactory.createRolesMappingSyncStrategy((SearchGuardRolesMapping) doc);
+                    for (OpenshiftRequestContext context : contexts){
+                        rolesMappingSync.syncFrom(context);
+                    }
+                } else if(ConfigurationSettings.SEARCHGUARD_ROLE_TYPE.equals(doc.getType())) {
+                    RolesSyncStrategy rolesSync = documentFactory.createRolesSyncStrategy((SearchGuardRoles) doc);
+                    for (OpenshiftRequestContext context : contexts) {
+                        rolesSync.syncFrom(context);
+                    }
+                }
+            }
+        }
+
+        @Override
+        public BulkRequest buildRequest(Client client, BulkRequestBuilder builder, Collection<SearchGuardACLDocument> docs) throws IOException {
+            for (SearchGuardACLDocument doc : docs) {
+                logContent("Updating {} to: {}", doc.getType(), doc);
+                Map<String, Object> content = new HashMap<>();
+                content.put(doc.getType(), new BytesArray(XContentHelper.toString(doc)));
+                UpdateRequestBuilder update = client
+                        .prepareUpdate(searchGuardIndex, doc.getType(), SEARCHGUARD_CONFIG_ID)
+                        .setDoc(content);
+                if(doc.getVersion() != null) {
+                    update.setVersion(doc.getVersion());
+                }
+                builder.add(update.request());
+            }
+            return builder.request();
+        }
+    }
+
     @SuppressWarnings("rawtypes")
     class ExpireOperation implements ACLDocumentOperation {
 
@@ -197,15 +237,15 @@ public class ACLDocumentManager implements ConfigurationSettings {
     }
 
     public void expire() {
-        syncAcl(new ExpireOperation(System.currentTimeMillis()));
+        syncAcl(new AclSyncOperation());
     }
 
     public void syncAcl(OpenshiftRequestContext context) {
         if(!syncAcl(new SyncFromContextOperation(context))){
             LOGGER.warn("Unable to sync ACLs for request from user: {}", context.getUser());
         }
-    }    
-    
+    }
+
     private boolean syncAcl(ACLDocumentOperation operation) {
         //try up to 30 seconds and then continue
         for (int n : new int [] {1 , 1 , 2 , 3 , 5 , 8}) {
@@ -223,7 +263,7 @@ public class ACLDocumentManager implements ConfigurationSettings {
         }
         return false;
     }
-    
+
     public boolean trySyncAcl(ACLDocumentOperation operation) {
         LOGGER.debug("Syncing the ACL to ElasticSearch");
         try (StoredContext ctx = threadContext.stashContext()) {
@@ -244,7 +284,7 @@ public class ACLDocumentManager implements ConfigurationSettings {
         }
         return false;
     }
-    
+
     @SuppressWarnings("rawtypes")
     private Collection<SearchGuardACLDocument> loadAcls() throws Exception {
         LOGGER.debug("Loading SearchGuard ACL...waiting up to 30s");
@@ -268,7 +308,7 @@ public class ACLDocumentManager implements ConfigurationSettings {
         }
         return docs;
     }
-    
+
     @SuppressWarnings("rawtypes")
     private BulkResponse writeAcl(ACLDocumentOperation operation, Collection<SearchGuardACLDocument> docs) throws Exception {
         BulkRequestBuilder builder = client.getClient().prepareBulk().setRefreshPolicy(RefreshPolicy.WAIT_UNTIL);
@@ -276,7 +316,7 @@ public class ACLDocumentManager implements ConfigurationSettings {
         client.addCommonHeaders();
         return this.client.getClient().bulk(request).actionGet();
     }
-    
+
     private boolean isSuccessfulWrite(BulkResponse response) {
         if(!response.hasFailures()) {
             ConfigUpdateRequest confRequest = new ConfigUpdateRequest(SEARCHGUARD_INITIAL_CONFIGS);

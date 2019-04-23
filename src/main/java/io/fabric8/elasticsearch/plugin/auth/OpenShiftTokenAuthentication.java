@@ -77,6 +77,7 @@ public class OpenShiftTokenAuthentication implements AuthenticationBackend, HTTP
 
     private static final Logger LOGGER = Loggers.getLogger(OpenShiftTokenAuthentication.class);
     private final Map<String, Settings> sars;
+    private static final byte[] DEFAULT_PASSWORD = "openshift".getBytes();
 
     public OpenShiftTokenAuthentication(final Settings settings) {
         sars = settings.getGroups("subjectAccessReviews");
@@ -93,7 +94,7 @@ public class OpenShiftTokenAuthentication implements AuthenticationBackend, HTTP
                 if (requestContext == OpenshiftRequestContext.EMPTY) {
                     return null;
                 }
-                return new AuthCredentials(requestContext.getUser(), retrieveBackendRoles(requestContext)).markComplete();
+                return new AuthCredentials(requestContext.getUser(), DEFAULT_PASSWORD).markComplete();
             } catch (ElasticsearchSecurityException ese) {
                 throw ese;
             } catch (Exception e) {

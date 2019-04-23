@@ -105,7 +105,7 @@ public class DynamicACLFilter implements ConfigurationSettings {
                     utils.logRequest(request);
                     final String kbnVersion = getKibanaVersion(request);
                     kibanaSeed.setDashboards(requestContext, kbnVersion, cdmProjectPrefix);
-                    aclManager.syncAcl(requestContext);
+                    //aclManager.syncAcl(requestContext);
                 }
             }
         } catch (Exception e) {

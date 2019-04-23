@@ -25,10 +25,12 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.URL;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
 
 import org.apache.commons.lang.ArrayUtils;
+import org.elasticsearch.common.settings.Settings;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -55,7 +57,7 @@ public class OpenshiftAPIServiceTest {
 
     @Rule
     public OpenShiftServer apiServer = new OpenShiftServer();
-    private OpenshiftAPIService service = new OpenshiftAPIService();
+    private OpenshiftAPIService service = new OpenshiftAPIService(new PluginSettings(Settings.builder().build()));
 
     @Before
     public void setup() {
@@ -121,7 +123,7 @@ public class OpenshiftAPIServiceTest {
         when(okClient.newCall(any(Request.class))).thenAnswer(answer);
         when(call.execute()).thenReturn(response);
         
-        service = new OpenshiftAPIService(factory );
+        service = new OpenshiftAPIService(new PluginSettings(Settings.builder().build()), factory );
         
         assertTrue(service.localSubjectAccessReview("sometoken", "openshift-logging", "get", "pod/metrics", null, ArrayUtils.EMPTY_STRING_ARRAY));
         Buffer buffer = new Buffer();
@@ -155,7 +157,7 @@ public class OpenshiftAPIServiceTest {
         when(okClient.newCall(any(Request.class))).thenAnswer(answer);
         when(call.execute()).thenReturn(response);
         
-        service = new OpenshiftAPIService(factory );
+        service = new OpenshiftAPIService(new PluginSettings(Settings.builder().build()), factory );
         
         assertTrue(service.localSubjectAccessReview("sometoken", "openshift-logging", "get", "/metrics", null, ArrayUtils.EMPTY_STRING_ARRAY));
         Buffer buffer = new Buffer();

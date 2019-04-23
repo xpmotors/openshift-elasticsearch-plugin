@@ -1,12 +1,12 @@
 /**
  * Copyright (C) 2015 Red Hat, Inc.
- *
+ * <p>
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- *
- *         http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * <p>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,15 +17,20 @@
 package io.fabric8.elasticsearch.plugin;
 
 import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ElasticsearchSecurityException;
+import org.elasticsearch.SpecialPermission;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
@@ -45,21 +50,206 @@ import okhttp3.Response;
 import okio.Buffer;
 
 public class OpenshiftAPIService {
-    
+
+    public static final String SERVICE_ACCOUNT_TOKEN = "openshift.acl.token";
     private static final String ACCEPT = "Accept";
     private static final String CONTENT_TYPE = "Content-Type";
     private static final String APPLICATION_JSON = "application/json";
     private static final Logger LOGGER = Loggers.getLogger(OpenshiftAPIService.class);
     private final OpenShiftClientFactory factory;
-    
-    public OpenshiftAPIService() {
-        this(new OpenShiftClientFactory(){});
+    private final PluginSettings pluginSettings;
+    private final String serviceAccountToken;
+
+    public OpenshiftAPIService(PluginSettings pluginSettings) {
+        this(pluginSettings, new OpenShiftClientFactory() {
+        });
     }
-    
-    public OpenshiftAPIService(OpenShiftClientFactory factory) {
+
+    public OpenshiftAPIService(PluginSettings pluginSettings,OpenShiftClientFactory factory) {
+        this.pluginSettings = pluginSettings;
         this.factory = factory;
+        this.serviceAccountToken = this.pluginSettings.getSettings().get(SERVICE_ACCOUNT_TOKEN,"");
     }
-    
+
+    public Set<String> getClusterAdmins(final Map<String,Set<String>> groupUsers){
+        return executePrivilegedAction(new PrivilegedAction<Set<String>>() {
+            @Override
+            public Set<String> run() {
+                try (DefaultOpenShiftClient client = factory.buildClient(serviceAccountToken)) {
+                    Request request = new Request.Builder()
+                            .url(client.getMasterUrl() + "apis/authorization.openshift.io/v1/clusterrolebindings")
+                            .header(ACCEPT, APPLICATION_JSON)
+                            .build();
+                    Response response = client.getHttpClient().newCall(request).execute();
+                    if (response.code() != RestStatus.OK.getStatus()) {
+                        throw new ElasticsearchSecurityException("Unable to retrieve user list", RestStatus.fromCode(response.code()));
+                    }
+                    Set<String> users = new HashSet<>();
+                    List<List<Map<String, String>>> raw = JsonPath.read(response.body().byteStream(), "$.items[*].subjects");
+                    for (List<Map<String, String>> lst : raw) {
+                        for (Map<String,String> map : lst){
+                            String kind = map.get("kind");
+                            if ("User".equals(kind)){
+                                users.add(map.get("name"));
+                            } else if ("Group".equals(kind)) {
+                                String groupName = map.get("name");
+                                if(groupUsers.containsKey(groupName)){
+                                    users.addAll(groupUsers.get(groupName));
+                                }
+                            }
+                        }
+                    }
+                    LOGGER.debug("admin:{}",users);
+                    return users;
+                } catch (KubernetesClientException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchSecurityException(e.getMessage());
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchException(e);
+                }
+            }
+        });
+    }
+
+    public Map<String,Set<String>> getGroupUsers() {
+        return executePrivilegedAction(new PrivilegedAction<Map<String, Set<String>>>() {
+            @Override
+            public Map<String, Set<String>> run() {
+                try (DefaultOpenShiftClient client = factory.buildClient(serviceAccountToken)) {
+                    Request request = new Request.Builder()
+                            .url(client.getMasterUrl() + "apis/user.openshift.io/v1/groups")
+                            .header(ACCEPT, APPLICATION_JSON)
+                            .build();
+                    Response response = client.getHttpClient().newCall(request).execute();
+                    if (response.code() != RestStatus.OK.getStatus()) {
+                        throw new ElasticsearchSecurityException("Unable to retrieve group list", RestStatus.fromCode(response.code()));
+                    }
+
+                    Map<String,Set<String>> groupUsers = new HashMap<String, Set<String>>();
+                    List<Map<String, Object>> raw = JsonPath.read(response.body().byteStream(), "$.items[*]");
+                    for (Map<String, Object> map : raw) {
+                        Map<String,String> metadata = (Map<String, String>) map.get("metadata");
+                        String groupName = metadata.get("name");
+                        List<String> users = (List<String>) map.get("users");
+                        if (users != null){
+                            groupUsers.put(groupName,new HashSet<>(users));
+                        }
+                    }
+
+                    LOGGER.debug("groups:{}",groupUsers);
+                    return groupUsers;
+                } catch (KubernetesClientException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchSecurityException(e.getMessage());
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchException(e);
+                }
+            }
+        });
+    }
+
+    public Map<String,Set<Project>> getUserProjects(final Map<String,Set<String>> groupUsers, final Set<Project> allProjects){
+        return executePrivilegedAction(new PrivilegedAction<Map<String,Set<Project>>>() {
+            @Override
+            public Map<String,Set<Project>> run() {
+                try (DefaultOpenShiftClient client = factory.buildClient(serviceAccountToken)) {
+                    Request request = new Request.Builder()
+                            .url(client.getMasterUrl() + "apis/authorization.openshift.io/v1/rolebindings")
+                            .header(ACCEPT, APPLICATION_JSON)
+                            .build();
+                    Response response = client.getHttpClient().newCall(request).execute();
+                    if (response.code() != RestStatus.OK.getStatus()) {
+                        throw new ElasticsearchSecurityException("Unable to retrieve user list", RestStatus.fromCode(response.code()));
+                    }
+
+                    Map<String,Project> projectMap = allProjects.stream()
+                            .collect(Collectors.toMap(x -> x.getName(), x -> x));
+
+                    Map<String,Set<Project>> userProjects = new HashMap<String, Set<Project>>();
+                    String text = response.body().string();
+                    List<Map<String, Object>> raw = JsonPath.read(text, "$.items[*]");
+
+                    for (Map<String, Object> map : raw) {
+                        Map<String,String> metadata = (Map<String, String>) map.get("metadata");
+                        String projectName = metadata.get("namespace");
+                        if(!projectMap.containsKey(projectName)){
+                            continue;
+                        }
+                        Project project = projectMap.get(projectName);
+                        List<Map<String,String>> subjects = (List<Map<String, String>>) map.get("subjects");
+
+                        for (Map<String,String> subject: subjects){
+                            String kind = subject.get("kind");
+
+                            if("User".equals(kind)){
+                                String username = subject.get("name");
+                                if(!userProjects.containsKey(username)){
+                                    userProjects.put(username,new HashSet<>());
+                                }
+                                userProjects.get(username).add(project);
+
+                            }else if("Group".equals(kind)){
+                                String groupName = subject.get("name");
+                                if(groupUsers.containsKey(groupName)){
+                                    Set<String> userLst = groupUsers.get(groupName);
+
+                                    for (String user : userLst){
+                                        if(!userProjects.containsKey(user)){
+                                            userProjects.put(user, new HashSet<>());
+                                        }
+                                        userProjects.get(user).add(project);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    LOGGER.debug("admin:{}",userProjects);
+                    return userProjects;
+                } catch (KubernetesClientException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchSecurityException(e.getMessage());
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchException(e);
+                }
+            }
+        });
+    }
+
+    public Set<String> getUsers() {
+        return executePrivilegedAction(new PrivilegedAction<Set<String>>() {
+            @Override
+            public Set<String> run() {
+                try (DefaultOpenShiftClient client = factory.buildClient(serviceAccountToken)) {
+                    Request request = new Request.Builder()
+                            .url(client.getMasterUrl() + "apis/user.openshift.io/v1/users")
+                            .header(ACCEPT, APPLICATION_JSON)
+                            .build();
+                    Response response = client.getHttpClient().newCall(request).execute();
+                    if (response.code() != RestStatus.OK.getStatus()) {
+                        throw new ElasticsearchSecurityException("Unable to retrieve user list", RestStatus.fromCode(response.code()));
+                    }
+                    Set<String> users = new HashSet<>();
+                    List<Map<String, String>> raw = JsonPath.read(response.body().byteStream(), "$.items[*].metadata");
+                    for (Map<String, String> map : raw) {
+                        users.add(map.get("name"));
+                    }
+                    LOGGER.debug("users:{}",users);
+                    return users;
+                } catch (KubernetesClientException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchSecurityException(e.getMessage());
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchException(e);
+                }
+            }
+        });
+    }
+
+
     public String userName(final String token) {
         Response response = null;
         try (DefaultOpenShiftClient client = factory.buildClient(token)) {
@@ -67,29 +257,50 @@ public class OpenshiftAPIService {
                     .url(client.getMasterUrl() + "apis/user.openshift.io/v1/users/~")
                     .header(ACCEPT, APPLICATION_JSON)
                     .build();
+            LOGGER.debug("token:{}. url:{}", token, client.getMasterUrl());
             response = client.getHttpClient().newCall(okRequest).execute();
             final String body = response.body().string();
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("Response: code '{}' {}", response.code(), body);
             }
-            if(response.code() != RestStatus.OK.getStatus()) {
+            if (response.code() != RestStatus.OK.getStatus()) {
                 throw new ElasticsearchSecurityException("Unable to determine username from the token provided", RestStatus.fromCode(response.code()));
             }
-            return JsonPath.read(body,"$.metadata.name");
+            return JsonPath.read(body, "$.metadata.name");
         } catch (IOException e) {
             LOGGER.error("Error retrieving username from token", e);
             throw new ElasticsearchException(e);
-        }        
+        }
     }
-    
-    public Set<Project> projectNames(final String token){
+
+
+    private <T> T executePrivilegedAction(PrivilegedAction<T> action){
+        final SecurityManager sm = System.getSecurityManager();
+        if (sm != null) {
+            sm.checkPermission(new SpecialPermission());
+        }
+        return AccessController.doPrivileged(action);
+    }
+
+    public Set<Project> projectNames() {
+        return executePrivilegedAction(new PrivilegedAction<Set<Project>>() {
+            @Override
+            public Set<Project> run() {
+                Set<Project> ret = projectNames(serviceAccountToken);
+                LOGGER.debug(ret);
+                return ret;
+            }
+        });
+    }
+
+    public Set<Project> projectNames(final String token) {
         try (DefaultOpenShiftClient client = factory.buildClient(token)) {
             Request request = new Request.Builder()
-                .url(client.getMasterUrl() + "apis/project.openshift.io/v1/projects")
-                .header(ACCEPT, APPLICATION_JSON)
-                .build();
+                    .url(client.getMasterUrl() + "apis/project.openshift.io/v1/projects")
+                    .header(ACCEPT, APPLICATION_JSON)
+                    .build();
             Response response = client.getHttpClient().newCall(request).execute();
-            if(response.code() != RestStatus.OK.getStatus()) {
+            if (response.code() != RestStatus.OK.getStatus()) {
                 throw new ElasticsearchSecurityException("Unable to retrieve users's project list", RestStatus.fromCode(response.code()));
             }
             Set<Project> projects = new HashSet<>();
@@ -97,6 +308,7 @@ public class OpenshiftAPIService {
             for (Map<String, String> map : raw) {
                 projects.add(new Project(map.get("name"), map.get("uid")));
             }
+            LOGGER.debug(projects);
             return projects;
         } catch (KubernetesClientException e) {
             LOGGER.error("Error retrieving project list", e);
@@ -106,10 +318,10 @@ public class OpenshiftAPIService {
             throw new ElasticsearchException(e);
         }
     }
-    
+
     /**
      * Execute a LocalSubectAccessReview
-     * 
+     *
      * @param token             a token to check
      * @param project           the namespace to check against
      * @param verb              the verb (e.g. view)
@@ -119,25 +331,25 @@ public class OpenshiftAPIService {
      *                            null  - use token scopes
      *                            empty - remove scopes
      *                            list  - an array of scopes
-     *                            
-     * @return  true if the SAR is satisfied
+     *
+     * @return true if the SAR is satisfied
      */
-    public boolean localSubjectAccessReview(final String token, 
-            final String project, final String verb, final String resource, final String resourceAPIGroup, final String [] scopes) {
+    public boolean localSubjectAccessReview(final String token,
+                                            final String project, final String verb, final String resource, final String resourceAPIGroup, final String[] scopes) {
         try (DefaultOpenShiftClient client = factory.buildClient(token)) {
             XContentBuilder payload = XContentFactory.jsonBuilder()
-                .startObject()
-                    .field("kind","SubjectAccessReview")
-                    .field("apiVersion","authorization.openshift.io/v1")
+                    .startObject()
+                    .field("kind", "SubjectAccessReview")
+                    .field("apiVersion", "authorization.openshift.io/v1")
                     .field("verb", verb)
                     .array("scopes", scopes);
-            if(resource.startsWith("/")) {
+            if (resource.startsWith("/")) {
                 payload.field("isNonResourceURL", Boolean.TRUE)
-                    .field("path", resource);
+                        .field("path", resource);
             } else {
                 payload.field("resourceAPIGroup", resourceAPIGroup)
-                    .field("resource", resource)
-                    .field("namespace", project);
+                        .field("resource", resource)
+                        .field("namespace", project);
             }
             payload.endObject();
             Request request = new Request.Builder()
@@ -150,7 +362,7 @@ public class OpenshiftAPIService {
             Response response = client.getHttpClient().newCall(request).execute();
             final String body = IOUtils.toString(response.body().byteStream());
             log(response, body);
-            if(response.code() != RestStatus.CREATED.getStatus()) {
+            if (response.code() != RestStatus.CREATED.getStatus()) {
                 throw new ElasticsearchSecurityException("Unable to determine user's operations role", RestStatus.fromCode(response.code()));
             }
             return JsonPath.read(body, "$.allowed");
@@ -159,40 +371,40 @@ public class OpenshiftAPIService {
         }
         return false;
     }
-    
+
     private void log(Request request) {
-        if(!LOGGER.isDebugEnabled()) {
+        if (!LOGGER.isDebugEnabled()) {
             return;
         }
         try {
             LOGGER.debug("Request: {}", request);
-            if(request.body() != null) {
+            if (request.body() != null) {
                 Buffer sink = new Buffer();
                 request.body().writeTo(sink);
                 LOGGER.debug("Request body: {}", new String(sink.readByteArray()));
             }
-        }catch(Exception e) {
+        } catch (Exception e) {
             LOGGER.error("Error trying to dump response", e);
         }
     }
 
     private void log(Response response, String body) {
-        if(!LOGGER.isDebugEnabled()) {
+        if (!LOGGER.isDebugEnabled()) {
             return;
         }
         try {
             LOGGER.debug("Response: {}", response);
             LOGGER.debug("Response body: {}", body);
-        }catch(Exception e) {
+        } catch (Exception e) {
             LOGGER.error("Error trying to dump response", e);
         }
     }
-    
+
     interface OpenShiftClientFactory {
         default DefaultOpenShiftClient buildClient(final String token) {
             Config config = new ConfigBuilder().withOauthToken(token).build();
             return new DefaultOpenShiftClient(config);
         }
-        
+
     }
 }
