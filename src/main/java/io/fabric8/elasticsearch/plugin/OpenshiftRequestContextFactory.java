@@ -41,6 +41,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.rest.RestRequest;
 
 import io.fabric8.elasticsearch.plugin.model.Project;
+import io.fabric8.elasticsearch.plugin.model.ServiceAccount;
 import io.fabric8.elasticsearch.util.RequestUtils;
 
 /**
@@ -175,10 +176,12 @@ public class OpenshiftRequestContextFactory {
 
     public List<OpenshiftRequestContext> getAlluserContext() {
         Set<String> users = apiService.getUsers();
+
         Set<Project> allProjects = apiService.projectNames();
         Map<String,Set<String>> groupUsers = apiService.getGroupUsers();
         Set<String> clusterAdmins = apiService.getClusterAdmins(groupUsers);
-        Map<String,Set<Project>> userProjects = apiService.getUserProjects(groupUsers,allProjects);
+        Map<String,Set<Project>> userProjects = apiService.getUserProjects(groupUsers, allProjects);
+
         List<OpenshiftRequestContext> ret = new ArrayList<>();
         for (String user : users){
             boolean isAdmin = clusterAdmins.contains(user);
@@ -198,10 +201,19 @@ public class OpenshiftRequestContextFactory {
             OpenshiftRequestContext item = new OpenshiftRequestContext(user,"",isAdmin,clearProjects,getKibanaIndex(user, isAdmin),this.kibanaIndexMode);
             ret.add(item);
         }
+
+        Map<ServiceAccount,Set<Project>> serviceAccountProjects = apiService.getServiceAccount(allProjects);
+        for (ServiceAccount sa : serviceAccountProjects.keySet()){
+            Set<Project> projects = serviceAccountProjects.get(sa);
+            Set<Project> clearProjects = projects.stream()
+                    .filter(project -> !isBlacklistProject(project.getName()))
+                    .collect(Collectors.toSet());
+            String saFormatName = String.format("system:serviceaccount:%s:%s", sa.getNamespace(), sa.getName());
+            OpenshiftRequestContext item = new OpenshiftRequestContext(saFormatName,"",false,clearProjects,getKibanaIndex(saFormatName, false), this.kibanaIndexMode);
+            ret.add(item);
+        }
         return ret;
     }
-
-
 
     public static class OpenshiftRequestContext {
 

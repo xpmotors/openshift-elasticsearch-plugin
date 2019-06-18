@@ -39,6 +39,7 @@ import org.elasticsearch.rest.RestStatus;
 import com.jayway.jsonpath.JsonPath;
 
 import io.fabric8.elasticsearch.plugin.model.Project;
+import io.fabric8.elasticsearch.plugin.model.ServiceAccount;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.ConfigBuilder;
 import io.fabric8.kubernetes.client.KubernetesClientException;
@@ -150,6 +151,64 @@ public class OpenshiftAPIService {
         });
     }
 
+    public Map<ServiceAccount,Set<Project>> getServiceAccount(final Set<Project> allProjects){
+        return executePrivilegedAction(new PrivilegedAction<Map<ServiceAccount, Set<Project>>>() {
+            @Override
+            public Map<ServiceAccount, Set<Project>> run() {
+                try (DefaultOpenShiftClient client = factory.buildClient(serviceAccountToken)) {
+                    Request request = new Request.Builder()
+                            .url(client.getMasterUrl() + "apis/authorization.openshift.io/v1/rolebindings")
+                            .header(ACCEPT, APPLICATION_JSON)
+                            .build();
+                    Response response = client.getHttpClient().newCall(request).execute();
+                    if (response.code() != RestStatus.OK.getStatus()) {
+                        throw new ElasticsearchSecurityException("Unable to retrieve user list", RestStatus.fromCode(response.code()));
+                    }
+
+                    Map<String,Project> projectMap = allProjects.stream()
+                            .collect(Collectors.toMap(x -> x.getName(), x -> x));
+
+                    Map<ServiceAccount,Set<Project>> userProjects = new HashMap<ServiceAccount, Set<Project>>();
+                    String text = response.body().string();
+                    List<Map<String, Object>> raw = JsonPath.read(text, "$.items[*]");
+
+                    for (Map<String, Object> map : raw) {
+                        Map<String,String> metadata = (Map<String, String>) map.get("metadata");
+                        String projectName = metadata.get("namespace");
+                        if(!projectMap.containsKey(projectName)){
+                            continue;
+                        }
+                        Project project = projectMap.get(projectName);
+                        List<Map<String,String>> subjects = (List<Map<String, String>>) map.get("subjects");
+
+                        for (Map<String,String> subject: subjects){
+                            String kind = subject.get("kind");
+
+                            if("ServiceAccount".equals(kind)){
+                                String username = subject.get("name");
+                                String namespace = subject.get("namespace");
+                                ServiceAccount sa = new ServiceAccount(username,namespace);
+
+                                if(!userProjects.containsKey(sa)){
+                                    userProjects.put(sa,new HashSet<>());
+                                }
+                                userProjects.get(sa).add(project);
+                            }
+                        }
+                    }
+                    LOGGER.debug("ServiceAccount Projects:{}",userProjects);
+                    return userProjects;
+                } catch (KubernetesClientException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchSecurityException(e.getMessage());
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchException(e);
+                }
+            }
+        });
+    }
+
     public Map<String,Set<Project>> getUserProjects(final Map<String,Set<String>> groupUsers, final Set<Project> allProjects){
         return executePrivilegedAction(new PrivilegedAction<Map<String,Set<Project>>>() {
             @Override
@@ -205,8 +264,39 @@ public class OpenshiftAPIService {
                             }
                         }
                     }
-                    LOGGER.debug("admin:{}",userProjects);
+                    LOGGER.debug("userProjects:{}",userProjects);
                     return userProjects;
+                } catch (KubernetesClientException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchSecurityException(e.getMessage());
+                } catch (IOException e) {
+                    LOGGER.error("Error retrieving project list", e);
+                    throw new ElasticsearchException(e);
+                }
+            }
+        });
+    }
+
+    public Set<ServiceAccount> getServiceAccounts(){
+        return executePrivilegedAction(new PrivilegedAction<Set<ServiceAccount>>() {
+            @Override
+            public Set<ServiceAccount> run() {
+                try (DefaultOpenShiftClient client = factory.buildClient(serviceAccountToken)) {
+                    Request request = new Request.Builder()
+                            .url(client.getMasterUrl() + "api/v1/serviceaccounts")
+                            .header(ACCEPT, APPLICATION_JSON)
+                            .build();
+                    Response response = client.getHttpClient().newCall(request).execute();
+                    if (response.code() != RestStatus.OK.getStatus()) {
+                        throw new ElasticsearchSecurityException("Unable to retrieve user list", RestStatus.fromCode(response.code()));
+                    }
+                    Set<ServiceAccount> users = new HashSet<>();
+                    List<Map<String, String>> raw = JsonPath.read(response.body().byteStream(), "$.items[*].metadata");
+                    for (Map<String, String> map : raw) {
+                        users.add(new ServiceAccount(map.get("name"), map.get("namespace")));
+                    }
+                    LOGGER.debug("ServiceAccount:{}",users);
+                    return users;
                 } catch (KubernetesClientException e) {
                     LOGGER.error("Error retrieving project list", e);
                     throw new ElasticsearchSecurityException(e.getMessage());
