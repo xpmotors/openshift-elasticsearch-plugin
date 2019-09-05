@@ -64,19 +64,19 @@ public class UserRolesSyncStrategy extends BaseRolesSyncStrategy implements Role
 
         //permissions for projects
         for (Project project : context.getProjects()) {
-            String indexName = String.format("%s?%s?*", project.getName().replace('.', '?'), project.getUID());
-            role.setActions(indexName, ALL, PROJECT_ROLE_ACTIONS);
+            //String indexName = String.format("%s?%s?*", project.getName().replace('.', '?'), project.getUID());
+            //role.setActions(indexName, ALL, PROJECT_ROLE_ACTIONS);
 
             // disable project uid
-            if(disableProjectUID) {
-                indexName = String.format("%s?*", project.getName().replace('.', '?'));
-                role.setActions(indexName, ALL, PROJECT_ROLE_ACTIONS);
-            }
+            //if(disableProjectUID) {
+            //    indexName = String.format("%s?*", project.getName().replace('.', '?'));
+            //    role.setActions(indexName, ALL, PROJECT_ROLE_ACTIONS);
+            //}
             // If using common data model, allow access to both the
             // $projname.$uuid.* indices and
             // the project.$projname.$uuid.* indices for backwards compatibility
             if (StringUtils.isNotEmpty(cdmProjectPrefix)) {
-                indexName = String.format("%s?%s?%s?*", cdmProjectPrefix.replace('.', '?'), project.getName().replace('.', '?'), project.getUID());
+                String indexName = String.format("%s?%s?%s?*", cdmProjectPrefix.replace('.', '?'), project.getName().replace('.', '?'), project.getUID());
                 role.setActions(indexName, ALL, PROJECT_ROLE_ACTIONS);
                 // disable project uid
                 if(disableProjectUID) {
