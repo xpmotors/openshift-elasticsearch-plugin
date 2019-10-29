@@ -18,6 +18,7 @@ package io.fabric8.elasticsearch.plugin.kibana;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -137,6 +138,7 @@ public class KibanaSeed implements ConfigurationSettings {
             changed = true;
             defaultProject = projectsWithIndices.isEmpty() ? null : projectsWithIndices.get(0);
         } else {
+            create(context.getKibanaIndex(), projectsWithIndices, new HashSet<>());
 
             List<Project> common = new ArrayList<Project>(projectsFromIndexPatterns);
 
